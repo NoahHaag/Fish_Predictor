@@ -4,10 +4,12 @@ import time
 
 import joblib
 import matplotlib.pyplot as plt
+import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, confusion_matrix
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from torchvision import datasets
@@ -74,33 +76,73 @@ def move_images_to_one_folder(source_dir, dest_dir):
                     shutil.move(source_path, dest_path)
                     print(f"Moved {filename} to {dest_dir}")
 
+
 def clean_class_name(name):
     # Replace spaces with underscores or adjust as needed
     return name.replace(" ", "_")
 
 
-source_directory = "train_2/"  # Path to the folder with mixed images
-destination_directory = "train_2/"  # Path to the folder where species folders should be created
+source_directory = "train/"  # Path to the folder with mixed images
+destination_directory = "train/"  # Path to the folder where species folders should be created
 
 
 # move_images_to_species_folders(source_directory, destination_directory)
+
+def evaluate_model(model, data_loader, device):
+    model.eval()  # Set model to evaluation mode
+    all_labels = []
+    all_preds = []
+    with torch.no_grad():  # No gradient tracking during validation
+        for images, labels in data_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            _, preds = torch.max(outputs, 1)  # Get the predicted class
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+
+    # Compute metrics
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
+    recall = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
+    f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+
+    return accuracy, precision, recall, f1
+
+
+def plot_confusion_matrix(y_true, y_pred, class_names):
+    cm = confusion_matrix(y_true, y_pred)
+
+    # Plot confusion matrix using seaborn heatmap
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.show()
 
 
 # Define your CNN model (FishClassifierCNN) class here
 class FishClassifierCNN(nn.Module):
     def __init__(self, num_classes):
         super(FishClassifierCNN, self).__init__()
+
+        # Define the convolutional layers
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
         self.conv3 = nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1)  # New layer
+        self.conv5 = nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1)  # New layer
+
         self.pool = nn.MaxPool2d(2, 2)
         self.dropout = nn.Dropout(0.5)
 
         # Compute correct input size for fc1 dynamically
         self.flattened_size = self._compute_flattened_size()
 
-        self.fc1 = nn.Linear(self.flattened_size, 1024)
-        self.fc2 = nn.Linear(1024, num_classes)
+        # Fully connected layers
+        self.fc1 = nn.Linear(self.flattened_size, 2048)  # Increased from 1024 to 2048
+        self.fc2 = nn.Linear(2048, 1024)  # New FC layer
+        self.fc3 = nn.Linear(1024, num_classes)
 
     def _compute_flattened_size(self):
         """Run a dummy forward pass to determine the number of features."""
@@ -109,18 +151,23 @@ class FishClassifierCNN(nn.Module):
             x = self.pool(F.relu(self.conv1(x)))
             x = self.pool(F.relu(self.conv2(x)))
             x = self.pool(F.relu(self.conv3(x)))
+            x = self.pool(F.relu(self.conv4(x)))  # Apply new conv4
+            x = self.pool(F.relu(self.conv5(x)))  # Apply new conv5
             return x.view(1, -1).shape[1]  # Dynamically compute
 
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
         x = self.pool(F.relu(self.conv2(x)))
         x = self.pool(F.relu(self.conv3(x)))
+        x = self.pool(F.relu(self.conv4(x)))  # Apply new conv4
+        x = self.pool(F.relu(self.conv5(x)))  # Apply new conv5
 
         x = x.view(x.shape[0], -1)  # Flatten dynamically
 
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
-        x = self.fc2(x)
+        x = F.relu(self.fc2(x))  # New FC layer with ReLU
+        x = self.fc3(x)  # Final output layer
         return x
 
 
@@ -138,14 +185,17 @@ transform = transforms.Compose([
 # Define dataset paths
 train_dir = "train"  # Path to the training folder
 val_dir = "validation"
+test_dir = "train_2"
 
 # Load dataset using ImageFolder (assuming folder structure is 'species_dir/train/species_name')
 train_dataset = datasets.ImageFolder(root=train_dir, transform=transform)
 val_dataset = datasets.ImageFolder(root=val_dir, transform=transform)
+test_dataset = datasets.ImageFolder(root=test_dir, transform=transform)
 
 # DataLoader setup
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=True)
 
 # for images, labels in train_loader:
 #     print("Train labels batch:", labels)
@@ -155,6 +205,7 @@ val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True)
 # Clean class names in both datasets
 train_classes_cleaned = {clean_class_name(cls) for cls in train_dataset.classes}
 val_classes_cleaned = {clean_class_name(cls) for cls in val_dataset.classes}
+test_classes_cleaned = {clean_class_name(cls) for cls in test_dataset.classes}
 
 # Combine the cleaned classes
 all_species = train_classes_cleaned | val_classes_cleaned
@@ -175,7 +226,6 @@ criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 scheduler = lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)  # Decay LR by 0.5 every 5 epochs
 
-
 # Initialize lists to store loss values for plotting
 train_losses = []
 val_losses = []
@@ -191,13 +241,13 @@ else:
     print("No previous model found. Training from scratch...")
 
 # Training loop
-num_epochs = 20
+num_epochs = 5
 best_val_loss = float("inf")
 patience = 3  # Stop training if no improvement after 3 epochs
 patience_counter = 0
 
 for epoch in range(num_epochs):
-    start_time = time.time()  # Start timing
+    start_time = time.time()
 
     model.train()
     running_train_loss = 0.0
@@ -213,20 +263,9 @@ for epoch in range(num_epochs):
         running_train_loss += loss.item()
 
     train_loss = running_train_loss / len(train_loader)
-    train_losses.append(train_loss)
 
-    # Validation loop
-    model.eval()
-    running_val_loss = 0.0
-    with torch.no_grad():
-        for images, labels in val_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            running_val_loss += loss.item()
-
-    val_loss = running_val_loss / len(val_loader)
-    val_losses.append(val_loss)
+    # Compute validation metrics
+    val_accuracy, val_precision, val_recall, val_f1 = evaluate_model(model, val_loader, device)
 
     end_time = time.time()  # End timing
     epoch_duration = end_time - start_time  # Compute duration
@@ -235,14 +274,14 @@ for epoch in range(num_epochs):
     minutes = int(epoch_duration // 60)
     seconds = int(epoch_duration % 60)
 
-    print(
-        f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Time: {minutes}m {seconds}s, LR: {scheduler.get_last_lr()[0]:.6f}"
-    )
+    print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, "
+          f"Val Accuracy: {val_accuracy:.4f}, Val Precision: {val_precision:.4f}, "
+          f"Val Recall: {val_recall:.4f}, Val F1 Score: {val_f1:.4f}, Time: {minutes}m {seconds}s")
 
-    # Check for improvement
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        patience_counter = 0  # Reset patience counter
+    # Save best model based on validation accuracy or other metrics
+    if val_accuracy > best_val_accuracy:
+        best_val_accuracy = val_accuracy
+        patience_counter = 0
         print(f"New best model found! Saving to {model_path}...")
         torch.save(model.state_dict(), model_path)
     else:
@@ -255,6 +294,7 @@ for epoch in range(num_epochs):
 
     # Step the scheduler
     scheduler.step()
+
 # Plot the loss curves
 epochs_ran = len(train_losses)  # Get actual number of epochs completed
 
@@ -268,5 +308,12 @@ plt.savefig("CNN training loss")
 plt.show()
 # Save the trained model
 torch.save(model.state_dict(), model_path)
+
+test_accuracy, test_precision, test_recall, test_f1 = evaluate_model(model, test_loader, device)
+
+print(f"Test Accuracy: {test_accuracy:.4f}")
+print(f"Test Precision: {test_precision:.4f}")
+print(f"Test Recall: {test_recall:.4f}")
+print(f"Test F1 Score: {test_f1:.4f}")
 
 print("Model training completed and saved as 'fish_classifier.pth'")

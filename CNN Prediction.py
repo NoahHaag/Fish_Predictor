@@ -69,7 +69,7 @@ def aggregate_predictions(probabilities, label_encoder):
     }
 
 
-output_dir = "test/"
+# output_dir = "test/"
 image_size = (128, 128)
 
 main_color = "yellow with black vertical stripes"
