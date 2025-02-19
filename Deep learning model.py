@@ -109,7 +109,7 @@ def evaluate_model(model, data_loader, device):
     return accuracy, precision, recall, f1
 
 
-def plot_confusion_matrix(y_true, y_pred, class_names):
+def plot_confusion_matrix(y_true, y_pred, class_names, filename="confusion_matrix.png"):
     cm = confusion_matrix(y_true, y_pred)
 
     # Plot confusion matrix using seaborn heatmap
@@ -118,56 +118,105 @@ def plot_confusion_matrix(y_true, y_pred, class_names):
     plt.xlabel('Predicted')
     plt.ylabel('True')
     plt.title('Confusion Matrix')
-    plt.show()
+
+    # Save the confusion matrix plot
+    plt.savefig(filename)
+    plt.close()
 
 
-# Define your CNN model (FishClassifierCNN) class here
+# Save both model and best validation accuracy
+def save_model(model, best_val_accuracy, model_path):
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'best_val_accuracy': best_val_accuracy
+    }, model_path)
+
+
+# Load model weights and best validation accuracy
+def load_model(model, model_path):
+    checkpoint = torch.load(model_path, weights_only=True)
+
+    # Load the model weights
+    model.load_state_dict(checkpoint['model_state_dict'])
+
+    # Retrieve the best validation accuracy
+    best_val_accuracy = checkpoint['best_val_accuracy']
+
+    return model, best_val_accuracy
+
+# Inception Module
+class InceptionBlock(nn.Module):
+    def __init__(self, in_channels):
+        super(InceptionBlock, self).__init__()
+
+        # 1x1 convolution
+        self.conv1x1 = nn.Conv2d(in_channels, 64, kernel_size=1)
+
+        # 3x3 convolution (after 1x1 reduction)
+        self.conv3x3_reduce = nn.Conv2d(in_channels, 64, kernel_size=1)
+        self.conv3x3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+
+        # 5x5 convolution (after 1x1 reduction)
+        self.conv5x5_reduce = nn.Conv2d(in_channels, 32, kernel_size=1)
+        self.conv5x5 = nn.Conv2d(32, 64, kernel_size=5, padding=2)
+
+        # Max pooling followed by 1x1 convolution
+        self.pool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+        self.pool_conv = nn.Conv2d(in_channels, 64, kernel_size=1)
+
+    def forward(self, x):
+        branch1 = F.relu(self.conv1x1(x))
+
+        branch2 = F.relu(self.conv3x3_reduce(x))
+        branch2 = F.relu(self.conv3x3(branch2))
+
+        branch3 = F.relu(self.conv5x5_reduce(x))
+        branch3 = F.relu(self.conv5x5(branch3))
+
+        branch4 = F.relu(self.pool_conv(self.pool(x)))
+
+        # Concatenate along depth dimension
+        return torch.cat([branch1, branch2, branch3, branch4], dim=1)
+
+# Updated CNN with Inception Modules
 class FishClassifierCNN(nn.Module):
     def __init__(self, num_classes):
         super(FishClassifierCNN, self).__init__()
 
-        # Define the convolutional layers
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1)
-        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1)  # New layer
-        self.conv5 = nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1)  # New layer
-
         self.pool = nn.MaxPool2d(2, 2)
+
+        # Replace second and third convolutional layers with Inception blocks
+        self.inception1 = InceptionBlock(64)  # First Inception Block
+        self.inception2 = InceptionBlock(320)  # Second Inception Block (concatenation increases depth)
+
         self.dropout = nn.Dropout(0.5)
 
         # Compute correct input size for fc1 dynamically
         self.flattened_size = self._compute_flattened_size()
 
-        # Fully connected layers
-        self.fc1 = nn.Linear(self.flattened_size, 2048)  # Increased from 1024 to 2048
-        self.fc2 = nn.Linear(2048, 1024)  # New FC layer
-        self.fc3 = nn.Linear(1024, num_classes)
+        self.fc1 = nn.Linear(self.flattened_size, 1024)
+        self.fc2 = nn.Linear(1024, num_classes)
 
     def _compute_flattened_size(self):
         """Run a dummy forward pass to determine the number of features."""
         with torch.no_grad():
             x = torch.randn(1, 3, 224, 224)  # Simulate an input batch
             x = self.pool(F.relu(self.conv1(x)))
-            x = self.pool(F.relu(self.conv2(x)))
-            x = self.pool(F.relu(self.conv3(x)))
-            x = self.pool(F.relu(self.conv4(x)))  # Apply new conv4
-            x = self.pool(F.relu(self.conv5(x)))  # Apply new conv5
+            x = self.pool(self.inception1(x))
+            x = self.pool(self.inception2(x))
             return x.view(1, -1).shape[1]  # Dynamically compute
 
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = self.pool(F.relu(self.conv3(x)))
-        x = self.pool(F.relu(self.conv4(x)))  # Apply new conv4
-        x = self.pool(F.relu(self.conv5(x)))  # Apply new conv5
+        x = self.pool(self.inception1(x))
+        x = self.pool(self.inception2(x))
 
         x = x.view(x.shape[0], -1)  # Flatten dynamically
-
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
-        x = F.relu(self.fc2(x))  # New FC layer with ReLU
-        x = self.fc3(x)  # Final output layer
+        x = self.fc2(x)
+
         return x
 
 
@@ -236,19 +285,22 @@ model_path = "CNN models/fish_classifier.pth"
 # Check if a previous model exists and load it
 if os.path.exists(model_path):
     print("Loading existing model for continued training...")
-    model.load_state_dict(torch.load(model_path, weights_only=True))
+    model, best_val_accuracy = load_model(model, model_path)
+    print(f"Best validation accuracy: {best_val_accuracy:.4f}")
 else:
     print("No previous model found. Training from scratch...")
+    best_val_accuracy = 0.0
 
 # Training loop
-num_epochs = 5
+num_epochs = 25
 best_val_loss = float("inf")
-patience = 3  # Stop training if no improvement after 3 epochs
 patience_counter = 0
+patience = 5  # Set your patience level
 
 for epoch in range(num_epochs):
     start_time = time.time()
 
+    # Training Phase
     model.train()
     running_train_loss = 0.0
     for images, labels in train_loader:
@@ -263,27 +315,50 @@ for epoch in range(num_epochs):
         running_train_loss += loss.item()
 
     train_loss = running_train_loss / len(train_loader)
+    train_losses.append(train_loss)  # Store training loss
+
+    # Validation Phase
+    model.eval()
+    running_val_loss = 0.0
+    all_preds, all_labels = [], []
+
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)  # Compute validation loss
+            running_val_loss += loss.item()
+
+            _, preds = torch.max(outputs, 1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    val_loss = running_val_loss / len(val_loader)
+    val_losses.append(val_loss)  # Store validation loss
 
     # Compute validation metrics
-    val_accuracy, val_precision, val_recall, val_f1 = evaluate_model(model, val_loader, device)
+    val_accuracy = accuracy_score(all_labels, all_preds)
+    val_precision = precision_score(all_labels, all_preds, average="weighted", zero_division=0)
+    val_recall = recall_score(all_labels, all_preds, average="weighted", zero_division=0)
+    val_f1 = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
 
     end_time = time.time()  # End timing
     epoch_duration = end_time - start_time  # Compute duration
-
-    # Convert epoch duration to minutes and seconds
     minutes = int(epoch_duration // 60)
     seconds = int(epoch_duration % 60)
 
-    print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, "
-          f"Val Accuracy: {val_accuracy:.4f}, Val Precision: {val_precision:.4f}, "
-          f"Val Recall: {val_recall:.4f}, Val F1 Score: {val_f1:.4f}, Time: {minutes}m {seconds}s")
+    print(f"Epoch {epoch + 1}/{num_epochs} | "
+          f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
+          f"Val Accuracy: {val_accuracy:.4f} | Precision: {val_precision:.4f} | "
+          f"Recall: {val_recall:.4f} | F1 Score: {val_f1:.4f} | "
+          f"Time: {minutes}m {seconds}s")
 
-    # Save best model based on validation accuracy or other metrics
+    # Save best model based on validation accuracy
     if val_accuracy > best_val_accuracy:
         best_val_accuracy = val_accuracy
         patience_counter = 0
         print(f"New best model found! Saving to {model_path}...")
-        torch.save(model.state_dict(), model_path)
+        save_model(model, best_val_accuracy, model_path)
     else:
         patience_counter += 1
         print(f"No improvement ({patience_counter}/{patience})")
@@ -292,22 +367,31 @@ for epoch in range(num_epochs):
             print("Early stopping triggered. Stopping training.")
             break
 
-    # Step the scheduler
-    scheduler.step()
+    # Step scheduler if defined
+    if scheduler:
+        scheduler.step()
 
 # Plot the loss curves
 epochs_ran = len(train_losses)  # Get actual number of epochs completed
 
-plt.plot(range(1, epochs_ran + 1), train_losses, label="Train Loss")
-plt.plot(range(1, epochs_ran + 1), val_losses, label="Validation Loss")
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.title('Training and Validation Loss')
+# Ensure we actually recorded validation losses before plotting
+if len(val_losses) == 0:
+    print("Warning: No validation losses recorded!")
+
+# Plot loss curves
+plt.figure(figsize=(8, 5))
+plt.plot(range(1, len(train_losses) + 1), train_losses, label="Train Loss", marker="o")
+plt.plot(range(1, len(val_losses) + 1), val_losses, label="Validation Loss", marker="s")
+plt.xlabel("Epochs")
+plt.ylabel("Loss")
+plt.title("Training and Validation Loss")
 plt.legend()
-plt.savefig("CNN training loss")
+plt.grid(True)
+plt.savefig("CNN_training_loss.png")
 plt.show()
+
 # Save the trained model
-torch.save(model.state_dict(), model_path)
+save_model(model, best_val_accuracy, model_path)
 
 test_accuracy, test_precision, test_recall, test_f1 = evaluate_model(model, test_loader, device)
 

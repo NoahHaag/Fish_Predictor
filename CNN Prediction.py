@@ -11,6 +11,9 @@ from compel import Compel
 from diffusers import DiffusionPipeline, DPMSolverMultistepScheduler
 
 
+# from Deep learning model.py import FishClassifierCNN
+
+
 def best_grid_shape(N):
     """
     Determine the best grid shape for displaying N images.
@@ -135,14 +138,52 @@ negative_prompt = (
 # Load CNN Model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Define your CNN model (FishClassifierCNN) class here
+# Inception Module
+class InceptionBlock(nn.Module):
+    def __init__(self, in_channels):
+        super(InceptionBlock, self).__init__()
+
+        # 1x1 convolution
+        self.conv1x1 = nn.Conv2d(in_channels, 64, kernel_size=1)
+
+        # 3x3 convolution (after 1x1 reduction)
+        self.conv3x3_reduce = nn.Conv2d(in_channels, 64, kernel_size=1)
+        self.conv3x3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+
+        # 5x5 convolution (after 1x1 reduction)
+        self.conv5x5_reduce = nn.Conv2d(in_channels, 32, kernel_size=1)
+        self.conv5x5 = nn.Conv2d(32, 64, kernel_size=5, padding=2)
+
+        # Max pooling followed by 1x1 convolution
+        self.pool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+        self.pool_conv = nn.Conv2d(in_channels, 64, kernel_size=1)
+
+    def forward(self, x):
+        branch1 = F.relu(self.conv1x1(x))
+
+        branch2 = F.relu(self.conv3x3_reduce(x))
+        branch2 = F.relu(self.conv3x3(branch2))
+
+        branch3 = F.relu(self.conv5x5_reduce(x))
+        branch3 = F.relu(self.conv5x5(branch3))
+
+        branch4 = F.relu(self.pool_conv(self.pool(x)))
+
+        # Concatenate along depth dimension
+        return torch.cat([branch1, branch2, branch3, branch4], dim=1)
+
+# Updated CNN with Inception Modules
 class FishClassifierCNN(nn.Module):
     def __init__(self, num_classes):
         super(FishClassifierCNN, self).__init__()
+
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1)
         self.pool = nn.MaxPool2d(2, 2)
+
+        # Replace second and third convolutional layers with Inception blocks
+        self.inception1 = InceptionBlock(64)  # First Inception Block
+        self.inception2 = InceptionBlock(320)  # Second Inception Block (concatenation increases depth)
+
         self.dropout = nn.Dropout(0.5)
 
         # Compute correct input size for fc1 dynamically
@@ -156,20 +197,20 @@ class FishClassifierCNN(nn.Module):
         with torch.no_grad():
             x = torch.randn(1, 3, 224, 224)  # Simulate an input batch
             x = self.pool(F.relu(self.conv1(x)))
-            x = self.pool(F.relu(self.conv2(x)))
-            x = self.pool(F.relu(self.conv3(x)))
+            x = self.pool(self.inception1(x))
+            x = self.pool(self.inception2(x))
             return x.view(1, -1).shape[1]  # Dynamically compute
 
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = self.pool(F.relu(self.conv3(x)))
+        x = self.pool(self.inception1(x))
+        x = self.pool(self.inception2(x))
 
         x = x.view(x.shape[0], -1)  # Flatten dynamically
-
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
         x = self.fc2(x)
+
         return x
 
 
