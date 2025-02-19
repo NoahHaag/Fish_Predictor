@@ -7,7 +7,7 @@ from compel import Compel
 from diffusers import DiffusionPipeline, DPMSolverMultistepScheduler
 
 output_dir = "train/"
-sample_size = 380
+# sample_size = 380
 
 # fish
 species_data = [
@@ -959,157 +959,134 @@ all_species = {data["species"] for data in species_data}
 
 target_species = {"Yellowhead Jawfish", "Four-Eyed Butterflyfish", "Yellow Goatfish",
                   "Yellow Stingray", "Sergent Major", "Yellowtail Damselfish"}
+def generate_fish_images(species_data, output_dir, sample_size, pipe, compel_proc, negative_prompt):
+    """
+    Generate and save fish images for each species.
 
-for data in species_data:
-    # if data["species"] not in target_species:
-    #     continue  # Skip species not in the target list
+    Parameters:
+        species_data (list): List of dictionaries containing species attributes.
+        output_dir (str): The directory where images will be saved.
+        sample_size (int): Number of images to generate per species.
+        pipe (object): The image generation pipeline.
+        compel_proc (function): Function to process the text prompt.
+        negative_prompt (str): The negative prompt for generation.
+    """
+    start_time = time.time()
 
-    species = data["species"]
-    main_color = data["main_color"]
-    secondary_color = data["secondary_color"]
-    body_shape = data["body_shape"]
-    num_v_stripes = data["num_v_stripes"]
-    num_h_stripes = data["num_h_stripes"]
-    num_spots = data["num_spots"]
-    mouth_angle = data["mouth_angle"]
-    habitat = data["habitat"]
-    behavioral_traits = data["behavioral_traits"]
-    group_behavior = data["group_behavior"]
+    for data in species_data:
+        species = data["species"]
+        species_dir = os.path.join(output_dir, species)
+        os.makedirs(species_dir, exist_ok=True)
 
-    # Define the species directory
-    species_dir = os.path.join(output_dir, species)  # Each species has its own folder
-
-    # Ensure the directory exists
-    os.makedirs(species_dir, exist_ok=True)
-
-    # Get existing images in the species folder
-    existing_files = [f for f in os.listdir(species_dir) if f.endswith(".jpeg")]
-
-    # Get existing indices
-    if existing_files:
+        # Get existing image indices
+        existing_files = [f for f in os.listdir(species_dir) if f.endswith(".jpeg")]
         indices = sorted(
-            [int(f.split(" ")[-1].split(".")[0]) for f in existing_files if f.split(" ")[-1].split(".")[0].isdigit()])
-    else:
-        indices = []
+            [int(f.split(" ")[-1].split(".")[0]) for f in existing_files if f.split(" ")[-1].split(".")[0].isdigit()]
+        ) if existing_files else []
 
-    # Determine how many more images need to be generated
-    missing_indices = [i for i in range(sample_size) if i not in indices]
+        missing_indices = [i for i in range(sample_size) if i not in indices]
 
-    for missing_index in missing_indices:
-        # Randomly decide which attributes to omit
-        omitted_features = random.sample(
-            ["num_v_stripes", "num_h_stripes", "num_spots", "scale_texture", "eye_characteristics"],
-            k=random.randint(1, 3)  # Randomly omit between 1 and 3 features
-        )
+        for missing_index in missing_indices:
+            omitted_features = random.sample(
+                ["num_v_stripes", "num_h_stripes", "num_spots", "scale_texture", "eye_characteristics"],
+                k=random.randint(1, 3)
+            )
 
-        # Build the description dynamically
-        color_description = random.choice([
-            f"{data['main_color']} with {data['secondary_color']} accents",
-            f"primarily {data['main_color']}, with a touch of {data['secondary_color']}",
-            f"a blend of {data['main_color']} and {data['secondary_color']} tones"
-        ])
+            color_description = random.choice([
+                f"{data['main_color']} with {data['secondary_color']} accents",
+                f"primarily {data['main_color']}, with a touch of {data['secondary_color']}",
+                f"a blend of {data['main_color']} and {data['secondary_color']} tones"
+            ])
 
-        pattern_description = (
-            f"{data['num_v_stripes']} vertical stripes, {data['num_h_stripes']} horizontal stripes, and {data['num_spots']} spots."
-            if "num_v_stripes" not in omitted_features and "num_h_stripes" not in omitted_features and "num_spots" not in omitted_features
-            else random.choice(["a smooth and uniform appearance", "a sleek, unpatterned body"])
-        )
+            pattern_description = (
+                f"{data['num_v_stripes']} vertical stripes, {data['num_h_stripes']} horizontal stripes, and {data['num_spots']} spots."
+                if all(feature not in omitted_features for feature in ["num_v_stripes", "num_h_stripes", "num_spots"])
+                else random.choice(["a smooth and uniform appearance", "a sleek, unpatterned body"])
+            )
 
-        mouth_description = random.choice([
-            f"The fish's mouth is {data['mouth_angle']}.",
-            f"With its {data['mouth_angle']} mouth, it feeds efficiently.",
-            f"Distinctive for its {data['mouth_angle']} mouth."
-        ])
+            mouth_description = random.choice([
+                f"The fish's mouth is {data['mouth_angle']}.",
+                f"With its {data['mouth_angle']} mouth, it feeds efficiently.",
+                f"Distinctive for its {data['mouth_angle']} mouth."
+            ])
 
-        habitat_description = random.choice([
-            f"It is found in {data['habitat']}, where it blends well with its surroundings.",
-            f"This species thrives in {data['habitat']}.",
-            f"Commonly inhabits {data['habitat']}, adapting well to its environment."
-        ])
+            habitat_description = random.choice([
+                f"It is found in {data['habitat']}, where it blends well with its surroundings.",
+                f"This species thrives in {data['habitat']}.",
+                f"Commonly inhabits {data['habitat']}, adapting well to its environment."
+            ])
 
-        # Get the list of traits that are True
-        true_traits = [trait for trait, value in data["behavioral_traits"].items() if value]
+            true_traits = [trait for trait, value in data["behavioral_traits"].items() if value]
+            behavior_sample_size = random.randint(1, min(2, len(true_traits))) if true_traits else 0
+            selected_behaviors = random.sample(true_traits, k=behavior_sample_size) if behavior_sample_size > 0 else []
 
-        # Ensure the sample size for behaviors is never larger than the number of available traits
-        behavior_sample_size = random.randint(1, min(2, len(true_traits))) if true_traits else 0
+            behavior_description = "It is known for its " + (
+                " and ".join(selected_behaviors) if selected_behaviors else "no specific behaviors.") + " behavior."
 
-        # Sample from the available traits, but only if there are traits to sample
-        selected_behaviors = random.sample(true_traits, k=behavior_sample_size) if behavior_sample_size > 0 else []
+            group_behavior_description = random.choice([
+                data["group_behavior"],
+                f"Often seen {data['group_behavior'].lower()}",
+                f"Frequently observed {data['group_behavior'].lower()}"
+            ])
 
-        behavior_description = "It is known for its " + (
-            " and ".join(selected_behaviors) if selected_behaviors else "no specific behaviors.") + " behavior."
+            fin_description = f"It has {data['fins']}." if "fins" in data and random.random() > 0.3 else ""
+            scale_description = f"Its scales are {data['scale_texture']}." if "scale_texture" in data and "scale_texture" not in omitted_features else ""
+            eye_description = f"It has {data['eye_characteristics']}." if "eye_characteristics" in data and "eye_characteristics" not in omitted_features else ""
+            lighting_description = f"The fish appears under {data['lighting_effects']}." if "lighting_effects" in data and random.random() > 0.5 else ""
+            avoid_features = f"Avoid misinterpretations: {data['avoid_features']}." if "avoid_features" in data and random.random() > 0.7 else ""
 
-        group_behavior_description = random.choice([
-            data["group_behavior"],
-            f"Often seen {data['group_behavior'].lower()}",
-            f"Frequently observed {data['group_behavior'].lower()}"
-        ])
+            prompt = (
+                f"A photorealistic image of {species}, a fish with {color_description}. "
+                f"It has a {data['body_shape']} body shape. {pattern_description} {mouth_description} "
+                f"{habitat_description} {behavior_description} {group_behavior_description} "
+                f"{fin_description} {scale_description} {eye_description} {lighting_description} {avoid_features} "
+                f"The fish is fully visible in the frame, showing its entire body, from head to tail, with all fins included. "
+                f"It is perfectly centered in the image, displayed in a balanced and symmetrical composition. The focus is entirely on the fish, "
+                f"capturing every detail of its scales, fins, eyes, and overall anatomy with lifelike textures. The background is minimal "
+                f"and softly blurred to avoid distractions, with natural lighting highlighting the fish's features."
+            ).rstrip(", ") + "."
 
-        # Add fin details if not omitted
-        fin_description = (
-            f"It has {data['fins']}."
-            if "fins" in data and random.random() > 0.3  # 30% chance to omit
-            else ""
-        )
+            prompt_embeds = compel_proc(prompt)
 
-        # Add scale texture if not omitted
-        scale_description = (
-            f"Its scales are {data['scale_texture']}."
-            if "scale_texture" in data and "scale_texture" not in omitted_features
-            else ""
-        )
+            image = pipe(
+                prompt_embeds=prompt_embeds,
+                negative_prompt=negative_prompt,
+                guidance_scale=20,
+                num_inference_steps=13,
+                num_images_per_prompt=1
+            ).images
 
-        # Add eye characteristics if not omitted
-        eye_description = (
-            f"It has {data['eye_characteristics']}."
-            if "eye_characteristics" in data and "eye_characteristics" not in omitted_features
-            else ""
-        )
-
-        # Add lighting effects
-        lighting_description = (
-            f"The fish appears under {data['lighting_effects']}."
-            if "lighting_effects" in data and random.random() > 0.5  # 50% chance to omit
-            else ""
-        )
-
-        # Avoid feature warning
-        avoid_features = (
-            f"Avoid misinterpretations: {data['avoid_features']}."
-            if "avoid_features" in data and random.random() > 0.7  # 70% chance to omit
-            else ""
-        )
-
-        # Construct the final prompt
-        prompt = (
-            f"A photorealistic image of {species}, a fish with {color_description}. "
-            f"It has a {data['body_shape']} body shape. {pattern_description} {mouth_description} "
-            f"{habitat_description} {behavior_description} {group_behavior_description} "
-            f"{fin_description} {scale_description} {eye_description} {lighting_description} {avoid_features} "
-            f"The fish is fully visible in the frame, showing its entire body, from head to tail, with all fins included. "
-            f"It is perfectly centered in the image, displayed in a balanced and symmetrical composition. The focus is entirely on the fish, "
-            f"capturing every detail of its scales, fins, eyes, and overall anatomy with lifelike textures. The background is minimal "
-            f"and softly blurred to avoid distractions, with natural lighting highlighting the fish's features."
-        )
-
-        prompt = prompt.rstrip(", ") + "."
-        prompt_embeds = compel_proc(prompt)
-        N = 1
-
-        # Generate the image (using your pipeline)
-        image = pipe(
-            prompt_embeds=prompt_embeds,
-            negative_prompt=negative_prompt,
-            guidance_scale=20,
-            num_inference_steps=13,
-            num_images_per_prompt=1,
-        ).images
-
-        # Save the image to the missing index
-        for j, img in enumerate(image):
             file_path = os.path.join(species_dir, f"{species} {missing_index}.jpeg")
-            img.save(file_path, quality=85)
+            image[0].save(file_path, quality=85)
             print(f"Saved image as {file_path}")
 
-    print(f"Generated {len(missing_indices)} images for species '{species}' in '{output_dir}'.")
-print(f"It took {time.time() - start_time:.2f} seconds to generate the images for each species")
+        print(f"Generated {len(missing_indices)} images for species '{species}' in '{output_dir}'.")
+
+    print(f"Total time: {time.time() - start_time:.2f} seconds.")
+
+generate_fish_images(
+    species_data=species_data,
+    output_dir="train/",
+    sample_size=385,  # Number of images per species
+    pipe=pipe,
+    compel_proc=compel_proc,
+    negative_prompt=negative_prompt
+)
+
+generate_fish_images(
+    species_data=species_data,
+    output_dir="validation/",
+    sample_size=60,  # Number of images per species
+    pipe=pipe,
+    compel_proc=compel_proc,
+    negative_prompt=negative_prompt
+)
+
+generate_fish_images(
+    species_data=species_data,
+    output_dir="test/",
+    sample_size=35,  # Number of images per species
+    pipe=pipe,
+    compel_proc=compel_proc,
+    negative_prompt=negative_prompt
+)
