@@ -1,4 +1,5 @@
 import math
+import time
 from collections import Counter
 
 import joblib
@@ -10,9 +11,9 @@ import torchvision.transforms as transforms
 from compel import Compel
 from diffusers import DiffusionPipeline, DPMSolverMultistepScheduler
 
+# from Deep_learning_model import FishClassifierCNN
 
-# from Deep learning model.py import FishClassifierCNN
-
+start_time = time.time()
 
 def best_grid_shape(N):
     """
@@ -230,13 +231,15 @@ transform = transforms.Compose([
 num_classes = 41  # Update this to match your dataset
 
 # Load trained model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = FishClassifierCNN(num_classes).to(device)
-model.load_state_dict(torch.load("CNN models/fish_classifier.pth", weights_only=True))
-model.eval()
+checkpoint = torch.load("CNN models/fish_classifier.pth", weights_only= True)  # Load the full checkpoint
+model.load_state_dict(checkpoint["model_state_dict"])
+model.eval()  # Set to evaluation mode
 
 
 # Process and predict user images
-N = 10
+N = 6
 prompt_embeds = compel_proc(prompt)
 
 generated_images = pipe(
@@ -295,3 +298,5 @@ final_prediction = class_names[final_class_index]
 final_confidence = weighted_votes[final_class_index] / np.sum(weighted_votes) * 100
 
 print(f"\nFinal Predicted Species (Confidence-Weighted): {final_prediction}, Confidence: {final_confidence:.2f}%")
+
+print(f"Total prediction time: {time.time() - start_time}")
