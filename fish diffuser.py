@@ -6,8 +6,8 @@ import torch
 from compel import Compel
 from diffusers import DiffusionPipeline, DPMSolverMultistepScheduler
 
-output_dir = "test/"
-sample_size = 5
+output_dir = "train/"
+sample_size = 380
 
 # fish
 species_data = [
