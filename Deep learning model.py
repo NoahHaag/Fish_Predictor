@@ -4,11 +4,13 @@ import time
 
 import joblib
 import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
+from PIL import Image
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, confusion_matrix
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
@@ -222,11 +224,19 @@ class FishClassifierCNN(nn.Module):
 
 # Image transformations: resizing and normalization
 transform = transforms.Compose([
+    transforms.RandomHorizontalFlip(p=0.5),  # 50% chance to flip
+    transforms.RandomRotation(10),  # Small rotations to avoid unrealistic angles
+    transforms.RandomAffine(degrees=0, shear=5, scale=(0.9, 1.1)),  # Small affine changes
+    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),  # Minor adjustments
+    transforms.RandomPerspective(distortion_scale=0.1, p=0.2),  # Only applied sometimes
+    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.3),  # Blur sometimes
     transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(),  # Flip image randomly
-    transforms.RandomRotation(15),  # Rotate randomly
-    transforms.RandomAffine(0, shear=10, scale=(0.8, 1.2)),  # Distortion
-    transforms.ColorJitter(brightness=0.2, contrast=0.2),  # Vary brightness/contrast
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+test_transform = transforms.Compose([
+    transforms.Resize((224, 224)),  # Resize only
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
@@ -234,22 +244,46 @@ transform = transforms.Compose([
 # Define dataset paths
 train_dir = "train"  # Path to the training folder
 val_dir = "validation"
-test_dir = "train_2"
+test_dir = "test"
 
 # Load dataset using ImageFolder (assuming folder structure is 'species_dir/train/species_name')
 train_dataset = datasets.ImageFolder(root=train_dir, transform=transform)
-val_dataset = datasets.ImageFolder(root=val_dir, transform=transform)
-test_dataset = datasets.ImageFolder(root=test_dir, transform=transform)
+val_dataset = datasets.ImageFolder(root=val_dir, transform=test_transform)
+test_dataset = datasets.ImageFolder(root=test_dir, transform=test_transform)
 
 # DataLoader setup
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=32, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
-# for images, labels in train_loader:
-#     print("Train labels batch:", labels)
-# for images, labels in val_loader:
-#     print("Validation labels batch:", labels)
+# Visualize transformations ####
+# Load a single image from the dataset
+img_path, _ = train_dataset.samples[150]  # Get first image path
+original_img = Image.open(img_path).convert("RGB")  # Load image
+
+# Number of transformed samples to visualize
+num_samples = 9
+
+# Apply transformations multiple times
+transformed_images = [transform(original_img) for _ in range(num_samples)]
+
+# Convert tensors to numpy images for plotting
+def tensor_to_image(tensor):
+    tensor = tensor.cpu().detach()  # Remove gradient tracking
+    tensor = tensor * torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1) + torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)  # Unnormalize
+    tensor = tensor.numpy().transpose(1, 2, 0)  # Convert to HWC format
+    return np.clip(tensor, 0, 1)  # Clip values to [0,1] for display
+
+# Plot transformed images in a grid
+fig, axes = plt.subplots(3, 3, figsize=(9, 9))  # 3x3 grid
+for ax, img in zip(axes.flatten(), transformed_images):
+    ax.imshow(tensor_to_image(img))
+    ax.axis("off")
+
+plt.suptitle("Augmented Images from Transformations", fontsize=14)
+plt.savefig("Augmented images")
+plt.show()
+
 
 # Clean class names in both datasets
 train_classes_cleaned = {clean_class_name(cls) for cls in train_dataset.classes}
@@ -257,7 +291,7 @@ val_classes_cleaned = {clean_class_name(cls) for cls in val_dataset.classes}
 test_classes_cleaned = {clean_class_name(cls) for cls in test_dataset.classes}
 
 # Combine the cleaned classes
-all_species = train_classes_cleaned | val_classes_cleaned
+all_species = train_classes_cleaned | val_classes_cleaned | test_classes_cleaned
 num_classes = len(all_species)
 
 print(f"Number of unique classes after cleaning: {num_classes}")
@@ -272,8 +306,8 @@ joblib.dump(train_dataset.classes, 'class_names.joblib')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = FishClassifierCNN(num_classes).to(device)
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-scheduler = lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)  # Decay LR by 0.5 every 5 epochs
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+scheduler = lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.5)  # Decay LR by 0.5 every 5 epochs
 
 # Initialize lists to store loss values for plotting
 train_losses = []
@@ -292,10 +326,10 @@ else:
     best_val_accuracy = 0.0
 
 # Training loop
-num_epochs = 25
+num_epochs = 10
 best_val_loss = float("inf")
 patience_counter = 0
-patience = 5  # Set your patience level
+patience = 3  # Set your patience level
 
 for epoch in range(num_epochs):
     start_time = time.time()
