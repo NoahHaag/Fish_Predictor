@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import time
@@ -1064,10 +1065,18 @@ def generate_fish_images(species_data, output_dir, sample_size, pipe, compel_pro
 
     print(f"Total time: {time.time() - start_time:.2f} seconds.")
 
+
+train_size = 385  # Number of images per species for training
+val_ratio = 0.1   # 10% of the training size for validation
+test_ratio = 0.1  # 10% of the training size for testing
+
+val_size = max(1, math.ceil(train_size * val_ratio))
+test_size = max(1, math.ceil(train_size * test_ratio))
+
 generate_fish_images(
     species_data=species_data,
     output_dir="train/",
-    sample_size=385,  # Number of images per species
+    sample_size=train_size,  # Number of images per species
     pipe=pipe,
     compel_proc=compel_proc,
     negative_prompt=negative_prompt
@@ -1076,7 +1085,7 @@ generate_fish_images(
 generate_fish_images(
     species_data=species_data,
     output_dir="validation/",
-    sample_size=60,  # Number of images per species
+    sample_size=val_size,  # Number of images per species
     pipe=pipe,
     compel_proc=compel_proc,
     negative_prompt=negative_prompt
@@ -1085,7 +1094,7 @@ generate_fish_images(
 generate_fish_images(
     species_data=species_data,
     output_dir="test/",
-    sample_size=35,  # Number of images per species
+    sample_size=test_size,  # Number of images per species
     pipe=pipe,
     compel_proc=compel_proc,
     negative_prompt=negative_prompt
