@@ -157,47 +157,50 @@ if __name__ == '__main__':
         def __init__(self, in_channels):
             super(InceptionBlock, self).__init__()
 
-            # 1x1 convolution
-            self.conv1x1 = nn.Conv2d(in_channels, 64, kernel_size=1)
+            # 1x1 Convolution
+            self.branch1 = nn.Conv2d(in_channels, 64, kernel_size=1)
 
-            # 3x3 convolution (after 1x1 reduction)
-            self.conv3x3_reduce = nn.Conv2d(in_channels, 64, kernel_size=1)
-            self.conv3x3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+            # 1x1 -> 3x3 Convolution
+            self.branch2 = nn.Sequential(
+                nn.Conv2d(in_channels, 64, kernel_size=1),
+                nn.ReLU(),
+                nn.Conv2d(64, 128, kernel_size=3, padding=1)
+            )
 
-            # 5x5 convolution (after 1x1 reduction)
-            self.conv5x5_reduce = nn.Conv2d(in_channels, 32, kernel_size=1)
-            self.conv5x5 = nn.Conv2d(32, 64, kernel_size=5, padding=2)
+            # 1x1 -> 5x5 Convolution
+            self.branch3 = nn.Sequential(
+                nn.Conv2d(in_channels, 32, kernel_size=1),
+                nn.ReLU(),
+                nn.Conv2d(32, 64, kernel_size=5, padding=2)
+            )
 
-            # Max pooling followed by 1x1 convolution
-            self.pool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
-            self.pool_conv = nn.Conv2d(in_channels, 64, kernel_size=1)
+            # 3x3 Max Pool -> 1x1 Convolution
+            self.branch4 = nn.Sequential(
+                nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
+                nn.Conv2d(in_channels, 32, kernel_size=1)
+            )
+
+            self.batch_norm = nn.BatchNorm2d(288)  # Adjust output channels after concatenation
+            self.dropout = nn.Dropout(0.3)
 
         def forward(self, x):
-            branch1 = F.relu(self.conv1x1(x))
-
-            branch2 = F.relu(self.conv3x3_reduce(x))
-            branch2 = F.relu(self.conv3x3(branch2))
-
-            branch3 = F.relu(self.conv5x5_reduce(x))
-            branch3 = F.relu(self.conv5x5(branch3))
-
-            branch4 = F.relu(self.pool_conv(self.pool(x)))
-
-            # Concatenate along depth dimension
-            return torch.cat([branch1, branch2, branch3, branch4], dim=1)
+            x = torch.cat([self.branch1(x), self.branch2(x), self.branch3(x), self.branch4(x)], dim=1)
+            x = self.batch_norm(x)
+            return self.dropout(F.relu(x))
 
 
-    # Updated CNN with Inception Modules
     class FishClassifierCNN(nn.Module):
         def __init__(self, num_classes):
             super(FishClassifierCNN, self).__init__()
 
             self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
+            self.batch_norm1 = nn.BatchNorm2d(64)
             self.pool = nn.MaxPool2d(2, 2)
 
-            # Replace second and third convolutional layers with Inception blocks
+            # Deeper Inception blocks
             self.inception1 = InceptionBlock(64)  # First Inception Block
-            self.inception2 = InceptionBlock(320)  # Second Inception Block (concatenation increases depth)
+            self.inception2 = InceptionBlock(288)  # Second Inception Block (concatenation increases depth)
+            self.inception3 = InceptionBlock(288)  # Third Inception Block for more depth
 
             self.dropout = nn.Dropout(0.5)
 
@@ -205,26 +208,31 @@ if __name__ == '__main__':
             self.flattened_size = self._compute_flattened_size()
 
             self.fc1 = nn.Linear(self.flattened_size, 1024)
-            self.fc2 = nn.Linear(1024, num_classes)
+            self.fc2 = nn.Linear(1024, 512)
+            self.fc3 = nn.Linear(512, num_classes)
 
         def _compute_flattened_size(self):
             """Run a dummy forward pass to determine the number of features."""
             with torch.no_grad():
                 x = torch.randn(1, 3, 224, 224)  # Simulate an input batch
-                x = self.pool(F.relu(self.conv1(x)))
+                x = self.pool(F.relu(self.batch_norm1(self.conv1(x))))
                 x = self.pool(self.inception1(x))
                 x = self.pool(self.inception2(x))
+                x = self.pool(self.inception3(x))
                 return x.view(1, -1).shape[1]  # Dynamically compute
 
         def forward(self, x):
-            x = self.pool(F.relu(self.conv1(x)))
+            x = self.pool(F.relu(self.batch_norm1(self.conv1(x))))
             x = self.pool(self.inception1(x))
             x = self.pool(self.inception2(x))
+            x = self.pool(self.inception3(x))
 
             x = x.view(x.shape[0], -1)  # Flatten dynamically
             x = F.relu(self.fc1(x))
             x = self.dropout(x)
-            x = self.fc2(x)
+            x = F.relu(self.fc2(x))
+            x = self.dropout(x)
+            x = self.fc3(x)
 
             return x
 
@@ -325,13 +333,14 @@ if __name__ == '__main__':
     # Set up the model, loss function, and optimizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = FishClassifierCNN(num_classes).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.5)  # Decay LR by 0.5 every 3 epochs
+    criterion = nn.CrossEntropyLoss().to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=2, factor=0.5)
 
     # Initialize lists to store loss values for plotting
     train_losses = []
     val_losses = []
+    val_accuracies = []
 
     # Define model path
     model_path = "CNN models/fish_classifier.pth"
@@ -345,12 +354,12 @@ if __name__ == '__main__':
         print("No previous model found. Training from scratch...")
         best_val_accuracy = 0.0
 
+
     # Training loop
-    num_epochs = 10
-    best_val_loss = float("inf")
+    num_epochs = 25
     patience_counter = 0
     patience = 3  # Set your patience level
-
+    best_val_loss = float("inf")
 
     for epoch in range(num_epochs):
         start_time = time.time()
@@ -424,27 +433,41 @@ if __name__ == '__main__':
         minutes = int(epoch_duration // 60)
         seconds = int(epoch_duration % 60)
 
-        print(f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | "
-              f"Val Loss: {val_loss:.4f} | Val Accuracy: {val_accuracy:.4f} | "
-              f"Time: {minutes} : {seconds}s | Estimated total remaining time: {total_time_remaining:.2f}s")
+        current_lr = optimizer.param_groups[0]['lr']  # Get learning rate from optimizer
+        print(f"Epoch {epoch + 1}/{num_epochs} | "
+              f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
+              f"Val Accuracy: {val_accuracy:.4f} | "
+              f"LR: {current_lr:.6f} | "
+              f"Time: {minutes}m {seconds}s | "
+              f"Estimated total remaining time: {total_time_remaining:.2f}s")
 
         # Save best model
-        if val_accuracy > best_val_loss:
-            best_val_loss = val_accuracy
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             patience_counter = 0
             print(f"New best model found! Saving to {model_path}...")
-            save_model(model, best_val_loss, model_path)
+            save_model(model, val_accuracy, model_path)
+
+        # Check if accuracy improved but loss did not
+        elif val_accuracy > (val_accuracies[-1] if val_accuracies else 0):
+            print("Warning: Validation accuracy increased but loss did not improve! Possible overfitting detected.")
+            patience_counter += 1  # Increase patience counter to monitor behavior
+
         else:
             patience_counter += 1
             print(f"No improvement ({patience_counter}/{patience})")
 
-            if patience_counter >= patience:
-                print("Early stopping triggered. Stopping training.")
-                break
+        # Stop training if patience is exceeded
+        if patience_counter >= patience:
+            print("Early stopping triggered. Stopping training.")
+            break
+
+        # Store validation accuracy history
+        val_accuracies.append(val_accuracy)
 
         # Step scheduler if defined
         if scheduler:
-            scheduler.step()
+            scheduler.step(val_loss)
 
     # Plot the loss curves
     epochs_ran = len(train_losses)  # Get actual number of epochs completed
@@ -467,6 +490,8 @@ if __name__ == '__main__':
 
     # Save the trained model
     save_model(model, best_val_accuracy, model_path)
+    print("Model training completed and saved as 'fish_classifier.pth'")
+
 
     test_accuracy, test_precision, test_recall, test_f1 = evaluate_model(model, test_loader, device)
 
@@ -475,4 +500,4 @@ if __name__ == '__main__':
     print(f"Test Recall: {test_recall:.4f}")
     print(f"Test F1 Score: {test_f1:.4f}")
 
-    print("Model training completed and saved as 'fish_classifier.pth'")
+
