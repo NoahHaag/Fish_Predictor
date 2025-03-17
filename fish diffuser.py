@@ -912,23 +912,20 @@ species_data = [
 
 
 def delete_empty_files(directory, min_kb_size=15):
-    """Delete files in the directory that are smaller than min_size bytes."""
+    """Recursively delete files in the directory (and subdirectories) that are smaller than min_kb_size KB."""
     if not os.path.exists(directory):
         print(f"Directory {directory} does not exist. Skipping cleanup.")
         return  # Exit function if directory doesn't exist
 
-    files = os.listdir(directory)
-    for file in files:
-        file_path = os.path.join(directory, file)
+    for root, _, files in os.walk(directory):  # Recursively iterate through subdirectories
+        for file in files:
+            file_path = os.path.join(root, file)
 
-        # Ensure it's a file before checking size
-        if os.path.isfile(file_path) and os.path.getsize(file_path) < min_kb_size * 1024:
-            os.remove(file_path)
-            print(f"Deleted empty file: {file_path}")
+            # Ensure it's a file before checking size
+            if os.path.isfile(file_path) and os.path.getsize(file_path) < min_kb_size * 1024:
+                os.remove(file_path)
+                print(f"Deleted small file: {file_path}")
 
-
-# Delete empty files before starting the image generation
-delete_empty_files(output_dir, min_kb_size=15)  # Change min_kb_size if needed
 
 pipe = DiffusionPipeline.from_pretrained(
     "stable-diffusion-v1-5/stable-diffusion-v1-5",
@@ -958,9 +955,16 @@ start_time = time.time()
 all_species = {data["species"] for data in species_data}
 # print(all_species)  # See if your species names match exactly
 
-target_species = {"Yellowhead Jawfish", "Four-Eyed Butterflyfish", "Yellow Goatfish",
-                  "Yellow Stingray", "Sergent Major", "Yellowtail Damselfish"}
-def generate_fish_images(species_data, output_dir, sample_size, pipe, compel_proc, negative_prompt):
+target_species = {"Harlequin Bass",
+                  "Longsnout Seahorse",
+                  "Yellow Stingray",
+                  "Rock Beauty Angelfish",
+                  "Yellowhead Jawfish,",
+                  "Peacock Flounder",
+                  "Four-Eyed Butterflyfish",
+                  "Great Barracuda",
+                  "Porkfish"}
+def generate_fish_images(species_data, output_dir, sample_size, pipe, compel_proc, negative_prompt, target_only=False):
     """
     Generate and save fish images for each species.
 
@@ -971,11 +975,17 @@ def generate_fish_images(species_data, output_dir, sample_size, pipe, compel_pro
         pipe (object): The image generation pipeline.
         compel_proc (function): Function to process the text prompt.
         negative_prompt (str): The negative prompt for generation.
+        target_only (bool): If True, only generate images for target species.
     """
     start_time = time.time()
 
     for data in species_data:
         species = data["species"]
+
+        # Skip species that are not in the target list if `target_only` is enabled
+        if target_only and species not in target_species:
+            continue
+
         species_dir = os.path.join(output_dir, species)
         os.makedirs(species_dir, exist_ok=True)
 
@@ -1066,7 +1076,13 @@ def generate_fish_images(species_data, output_dir, sample_size, pipe, compel_pro
     print(f"Total time: {time.time() - start_time:.2f} seconds.")
 
 
-train_size = 385  # Number of images per species for training
+
+# Delete empty files before starting the image generation
+delete_empty_files("train/", min_kb_size=15)  # Change min_kb_size if needed
+delete_empty_files("validation/", min_kb_size=15)
+delete_empty_files("test/", min_kb_size=15)
+
+train_size = 450  # Number of images per species for training
 val_ratio = 0.1   # 10% of the training size for validation
 test_ratio = 0.1  # 10% of the training size for testing
 
@@ -1079,7 +1095,8 @@ generate_fish_images(
     sample_size=train_size,  # Number of images per species
     pipe=pipe,
     compel_proc=compel_proc,
-    negative_prompt=negative_prompt
+    negative_prompt=negative_prompt,
+    target_only=False
 )
 
 generate_fish_images(
@@ -1088,7 +1105,8 @@ generate_fish_images(
     sample_size=val_size,  # Number of images per species
     pipe=pipe,
     compel_proc=compel_proc,
-    negative_prompt=negative_prompt
+    negative_prompt=negative_prompt,
+    target_only= False
 )
 
 generate_fish_images(
@@ -1097,5 +1115,6 @@ generate_fish_images(
     sample_size=test_size,  # Number of images per species
     pipe=pipe,
     compel_proc=compel_proc,
-    negative_prompt=negative_prompt
+    negative_prompt=negative_prompt,
+    target_only= False
 )
