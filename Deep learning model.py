@@ -20,11 +20,10 @@ if __name__ == '__main__':
     import torchvision.transforms as transforms
     from PIL import Image
     from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, confusion_matrix, \
-    classification_report
+        classification_report, cohen_kappa_score, matthews_corrcoef, balanced_accuracy_score, average_precision_score
     from torch.optim import lr_scheduler
     from torch.utils.data import DataLoader
     from torchvision import datasets
-    from torchvision_extra.losses import ArcFaceLoss
 
 
     def move_images_to_species_folders(source_dir, dest_dir):
@@ -121,7 +120,21 @@ if __name__ == '__main__':
         return accuracy, precision, recall, f1
 
 
-    def plot_confusion_matrix(model, dataloader, class_names, device):
+    def plot_confusion_matrix_and_find_low_recall(model, dataloader, class_names, device, thresholds=[0.5]):
+        """
+        Plots confusion matrix, prints classification report, and identifies species with low performance
+        based on multiple Recall thresholds.
+
+        Parameters:
+        - model: PyTorch model
+        - dataloader: DataLoader for the evaluation dataset
+        - class_names: List of species names
+        - device: Device for model evaluation (e.g., 'cuda' or 'cpu')
+        - thresholds: List of Recall thresholds to evaluate
+
+        Returns:
+        - dict: Dictionary mapping each threshold to the species below it
+        """
         model.eval()
         all_preds = []
         all_labels = []
@@ -144,11 +157,32 @@ if __name__ == '__main__':
         plt.xlabel("Predicted Label")
         plt.ylabel("True Label")
         plt.title("Confusion Matrix")
-        plt.savefig("Classification Matrix.jpeg")
+        plt.savefig("Classification_Matrix.jpeg")
         plt.show()
 
-        # Print classification report
-        print("\nClassification Report:\n", classification_report(all_labels, all_preds, target_names=class_names))
+        # Classification report for detailed metrics
+        report = classification_report(all_labels, all_preds, target_names=class_names, output_dict=True)
+
+        # Identify species that fall below each threshold
+        low_recall_species = {threshold: [] for threshold in thresholds}
+
+        for species, metrics in report.items():
+            if isinstance(metrics, dict):  # Ignore non-class entries in the report
+                recall_score = metrics.get("recall", 0)
+                for threshold in thresholds:
+                    if recall_score < threshold:
+                        low_recall_species[threshold].append((species, recall_score))
+
+        # Display results
+        for threshold, species_list in low_recall_species.items():
+            print(f"\nSpecies with Recall below {threshold}:")
+            if species_list:
+                for species, score in species_list:
+                    print(f"  - {species} (Recall: {score:.2f})")
+            else:
+                print("  None")
+
+        return low_recall_species
 
 
     # Save both model and best validation accuracy
@@ -172,7 +206,47 @@ if __name__ == '__main__':
         return model, best_val_accuracy
 
 
-    #  Inception Block with Improved Features
+    # Function to load matching weights only
+    def load_partial_weights(model, checkpoint_path):
+        checkpoint = torch.load(checkpoint_path,
+                                map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+
+        model_state_dict = model.state_dict()
+        pretrained_dict = {k: v for k, v in checkpoint['model_state_dict'].items() if
+                           k in model_state_dict and v.size() == model_state_dict[k].size()}
+
+        model_state_dict.update(pretrained_dict)  # Update only matching keys
+        model.load_state_dict(model_state_dict)
+
+        print(f"Loaded {len(pretrained_dict)} matching layers out of {len(model_state_dict)} total layers.")
+        return model, checkpoint.get('best_val_accuracy', 0.0)  # Default to 0 if no accuracy stored
+
+
+    class FocalLoss(nn.Module):
+        def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
+            super(FocalLoss, self).__init__()
+            self.gamma = gamma
+            self.alpha = alpha  # Optional: Class weight balance
+            self.reduction = reduction
+
+        def forward(self, inputs, targets):
+            ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+            pt = torch.exp(-ce_loss)  # Probability of correct class
+            focal_loss = (1 - pt) ** self.gamma * ce_loss
+
+            if self.alpha is not None:
+                alpha_weights = self.alpha[targets]
+                focal_loss *= alpha_weights
+
+            if self.reduction == 'mean':
+                return focal_loss.mean()
+            elif self.reduction == 'sum':
+                return focal_loss.sum()
+            else:
+                return focal_loss
+
+
+    # Inception Module
     class InceptionBlock(nn.Module):
         def __init__(self, in_channels):
             super(InceptionBlock, self).__init__()
@@ -188,17 +262,17 @@ if __name__ == '__main__':
             self.branch2 = nn.Sequential(
                 nn.Conv2d(in_channels, 64, kernel_size=1),
                 nn.BatchNorm2d(64),
-                nn.LeakyReLU(0.01),
+                nn.LeakyReLU(),
                 nn.Conv2d(64, 128, kernel_size=3, padding=1),
                 nn.BatchNorm2d(128),
                 nn.LeakyReLU(0.01)
             )
 
-            # 1x1 -> 5x5 Convolution (Changed ReLU to LeakyReLU for consistency)
+            # 1x1 -> 5x5 Convolution
             self.branch3 = nn.Sequential(
                 nn.Conv2d(in_channels, 32, kernel_size=1),
                 nn.BatchNorm2d(32),
-                nn.LeakyReLU(0.01),
+                nn.ReLU(),
                 nn.Conv2d(32, 64, kernel_size=5, padding=2),
                 nn.BatchNorm2d(64),
                 nn.LeakyReLU(0.01)
@@ -212,88 +286,72 @@ if __name__ == '__main__':
                 nn.LeakyReLU(0.01)
             )
 
-            # Batch normalization & dropout to improve generalization
-            self.batch_norm = nn.BatchNorm2d(288)
+            # Output normalization & dropout
+            self.batch_norm = nn.BatchNorm2d(288)  # Adjust for concatenated output
             self.dropout = nn.Dropout(0.3)
 
         def forward(self, x):
             x = torch.cat([self.branch1(x), self.branch2(x), self.branch3(x), self.branch4(x)], dim=1)
             x = self.batch_norm(x)
-            x = self.dropout(x)
+            x = self.dropout(F.leaky_relu(x, negative_slope=0.01))
             return x
 
 
-    # Main Fish Classifier Model
     class FishClassifierCNN(nn.Module):
-        def __init__(self, num_classes):
+        def __init__(self, num_classes=41):
             super(FishClassifierCNN, self).__init__()
 
-            self.conv1 = nn.Sequential(
-                nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(64),
-                nn.LeakyReLU(0.01),
-                nn.MaxPool2d(2, 2)
-            )
+            # First convolution block - fewer filters, larger kernel
+            self.conv1 = nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2)
+            self.bn1 = nn.BatchNorm2d(32)
 
-            self.inception1 = InceptionBlock(64)
-            self.inception2 = InceptionBlock(288)
-            self.inception3 = InceptionBlock(288)
+            # Second convolution block - fewer layers
+            self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+            self.bn2 = nn.BatchNorm2d(64)
 
-            self.flattened_size = self._compute_flattened_size()
+            # Third convolution block - simplified structure
+            self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
+            self.bn3 = nn.BatchNorm2d(128)
 
-            # Feature Extractor (Instead of classifier, it outputs a feature vector)
-            self.feature_extractor = nn.Sequential(
-                nn.Linear(self.flattened_size, 1024),
-                nn.BatchNorm1d(1024),
-                nn.LeakyReLU(0.01),
-                nn.Dropout(0.3),
+            # Fourth convolution block (optional) - further reduced
+            self.conv4 = nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1)
+            self.bn4 = nn.BatchNorm2d(256)
 
-                nn.Linear(1024, 512),  # Output 512-dimensional feature vector
-                nn.BatchNorm1d(512),
-                nn.LeakyReLU(0.01),
-                nn.Dropout(0.3)
-            )
+            # Global Average Pooling for better feature aggregation
+            self.global_pool = nn.AdaptiveAvgPool2d(1)
 
-            # ArcFace Loss (replaces traditional classifier)
-            self.arcface = ArcFaceLoss(512, num_classes)  # 512 = embedding size
+            # Fully connected layers - reduced size
+            self.fc1 = nn.Linear(256, 128)
+            self.dropout = nn.Dropout(0.4)
+            self.fc2 = nn.Linear(128, num_classes)
 
-        def _compute_flattened_size(self):
-            """Run a dummy forward pass to determine the number of features before FC layers."""
-            with torch.no_grad():
-                x = torch.randn(1, 3, 224, 224)
-                x = self.conv1(x)
-                x = self.inception1(x)
-                x = self.inception2(x)
-                x = self.inception3(x)
-                x = F.adaptive_avg_pool2d(x, (1, 1))
-                return x.view(1, -1).shape[1]
+        def forward(self, x):
+            x = F.relu(self.bn1(self.conv1(x)))
+            x = F.relu(self.bn2(self.conv2(x)))
+            x = F.relu(self.bn3(self.conv3(x)))
+            x = F.relu(self.bn4(self.conv4(x)))
 
-        def forward(self, x, labels=None):
-            x = self.conv1(x)
-            x = self.inception1(x)
-            x = self.inception2(x)
-            x = self.inception3(x)
+            x = self.global_pool(x)
+            x = torch.flatten(x, 1)
 
-            x = F.adaptive_avg_pool2d(x, (1, 1))
-            x = x.view(x.shape[0], -1)
+            x = F.relu(self.fc1(x))
+            x = self.dropout(x)
+            x = self.fc2(x)
 
-            features = self.feature_extractor(x)  # Get feature vector
-
-            if labels is not None:
-                return self.arcface(features, labels)  # Apply ArcFace loss
-            return features  # During inference, return embeddings
+            return x
 
 
     # Image transformations: resizing and normalization
     transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(p=0.5),  # 50% chance to flip
-        transforms.RandomRotation(10),  # Small rotations to avoid unrealistic angles
-        transforms.RandomAffine(degrees=0, shear=5, scale=(0.9, 1.1)),  # Small affine changes
-        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),  # Minor adjustments
-        transforms.RandomPerspective(distortion_scale=0.1, p=0.2),  # Only applied sometimes
-        transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.3),  # Blur sometimes
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
+        transforms.Resize((224, 224)),  # Resize early for faster downstream operations
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(15),
+        transforms.RandomAffine(degrees=0, shear=5, scale=(0.8, 1.2)),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
+        transforms.RandomPerspective(distortion_scale=0.2, p=0.3),
+        transforms.RandomApply([transforms.GaussianBlur(kernel_size=5, sigma=(0.3, 2.5))], p=0.5),
+        transforms.ToTensor(),  # Tensor conversion after all PIL-based changes
+        transforms.RandomErasing(p=0.3, scale=(0.02, 0.1), ratio=(0.3, 3.3)),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
@@ -314,12 +372,12 @@ if __name__ == '__main__':
     test_dataset = datasets.ImageFolder(root=test_dir, transform=test_transform)
 
     # DataLoader setup
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True,
-                              num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=2)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False,
-                            num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=2)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False,
-                             num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=2)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True,
+                              num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=3)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False,
+                            num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=3)
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False,
+                             num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=3)
 
     # Visualize transformations ####
     # Load a single image from the dataset
@@ -383,15 +441,19 @@ if __name__ == '__main__':
     class_weights = compute_class_weight('balanced', classes=np.unique(train_dataset.targets), y=train_dataset.targets)
     class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
     model = FishClassifierCNN(num_classes).to(device)
-    # criterion = nn.CrossEntropyLoss(weight= class_weights).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20, eta_min=1e-6)
+    # criterion = nn.CrossEntropyLoss(weight= class_weights, label_smoothing=0.1).to(device)
+    alpha = torch.full((41,), 0.025).to(device)
+    criterion = FocalLoss(gamma=2.0, alpha=alpha)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=20,  # First restart at epoch 10
+        T_mult=2,  # Each restart cycle doubles in length
+        eta_min=1e-6  # Minimum learning rate to prevent stagnation
+    )
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20, eta_min=1e-6)
     # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.8)
-
-    # Initialize lists to store loss values for plotting
-    train_losses = []
-    val_losses = []
-    val_accuracies = []
+    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
 
     # Define model path
     model_path = "CNN models/fish_classifier.pth"
@@ -399,20 +461,18 @@ if __name__ == '__main__':
     # Check if a previous model exists and load it
     if os.path.exists(model_path):
         print("Loading existing model for continued training...")
-        model, best_val_accuracy = load_model(model, model_path)
+        model, best_val_accuracy = load_partial_weights(model, model_path)
         print(f"Best validation accuracy: {best_val_accuracy:.4f}")
     else:
         print("No previous model found. Training from scratch...")
         best_val_accuracy = 0.0
+
     # Initialize variables
-    num_epochs = 30
+    num_epochs = 100
     patience_counter = 0
-    patience = 5
+    patience = 8
     best_val_loss = float("inf")
     train_losses, val_losses, val_accuracies = [], [], []
-
-    # Define optimizer
-    optimizer = AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
 
     for epoch in range(num_epochs):
         start_time = time.time()
@@ -420,34 +480,33 @@ if __name__ == '__main__':
         running_train_loss = 0.0
         batch_times = []  # Store batch times
 
-        # Training Phase
         for batch_idx, (images, labels) in enumerate(train_loader):
-            batch_start = time.time()
+            batch_start = time.time()  # Track batch start time
 
-            images, labels = images.to(device), labels.to(device)
+            images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             optimizer.zero_grad()
-
-            # ArcFace Loss integrated into model call
-            loss = model(images, labels)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-
             running_train_loss += loss.item()
-            batch_end = time.time()
-            batch_times.append(batch_end - batch_start)
 
-            # Estimate remaining time
+            batch_end = time.time()
+            batch_times.append(batch_end - batch_start)  # Store batch processing time
+
+            # Estimate time remaining
             avg_batch_time = sum(batch_times) / len(batch_times)
             remaining_batches = len(train_loader) - (batch_idx + 1)
             estimated_time_remaining = avg_batch_time * remaining_batches
-            est_mins, est_secs = divmod(int(estimated_time_remaining), 60)
+            est_mins = int(estimated_time_remaining // 60)
+            est_secs = int(estimated_time_remaining % 60)
 
-            # Print batch progress
+            # Print real-time batch progress
             sys.stdout.write(f"\rEpoch {epoch + 1}/{num_epochs} - "
                              f"Batch {batch_idx + 1}/{len(train_loader)} - "
                              f"Time per batch: {avg_batch_time:.2f}s - "
                              f"Estimated time left: {est_mins}m {est_secs}s")
-            sys.stdout.flush()
+            sys.stdout.flush()  # Force immediate output
 
         print()  # Ensure newline after epoch progress
 
@@ -458,42 +517,61 @@ if __name__ == '__main__':
         model.eval()
         running_val_loss = 0.0
         all_preds, all_labels = [], []
+        all_outputs = []
 
         with torch.no_grad():
             for images, labels in val_loader:
                 images, labels = images.to(device), labels.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                running_val_loss += loss.item()
 
-                # Get feature embeddings
-                features = model(images)
-
-                # Compute cosine similarity for classification
-                similarity = torch.matmul(features, model.arcface.weight.T)
-                preds = torch.argmax(similarity, dim=1)
-
+                _, preds = torch.max(outputs, 1)
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
 
-        # Compute loss & metrics
+                # Collect raw outputs for AP calculation
+                all_outputs.append(outputs.softmax(dim=1).cpu().numpy())
+
+        # Concatenate collected outputs and labels
+        all_outputs = np.concatenate(all_outputs, axis=0)
+
         val_loss = running_val_loss / len(val_loader)
         val_losses.append(val_loss)
+
+        # Compute validation metrics
         val_accuracy = accuracy_score(all_labels, all_preds)
         val_precision = precision_score(all_labels, all_preds, average="weighted", zero_division=0)
         val_recall = recall_score(all_labels, all_preds, average="weighted", zero_division=0)
         val_f1 = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
+        val_kappa = cohen_kappa_score(all_labels, all_preds)
+        val_mcc = matthews_corrcoef(all_labels, all_preds)
+        val_bal_acc = balanced_accuracy_score(all_labels, all_preds)
+
+        # If your model outputs probabilities, you can compute AP:
+        if hasattr(outputs, 'softmax'):
+            val_ap = average_precision_score(all_labels, all_outputs, average="weighted")
+        else:
+            val_ap = float('nan')  # Default to NaN if probabilities are unavailable
 
         # Compute epoch duration
         epoch_duration = time.time() - start_time
-        total_time_remaining = (epoch_duration / (epoch + 1)) * (num_epochs - (epoch + 1))
-        minutes, seconds = divmod(int(epoch_duration), 60)
+        avg_epoch_time = epoch_duration / (epoch + 1)
+        remaining_epochs = num_epochs - (epoch + 1)
+        total_time_remaining = avg_epoch_time * remaining_epochs
+        minutes = int(epoch_duration // 60)
+        seconds = int(epoch_duration % 60)
 
-        # Get learning rate
-        current_lr = optimizer.param_groups[0]['lr']
+        current_lr = optimizer.param_groups[0]['lr']  # Get learning rate from optimizer
 
         print(f"Epoch {epoch + 1}/{num_epochs} | "
               f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Accuracy: {val_accuracy:.4f} | LR: {current_lr:.6f} | "
+              f"Val Accuracy: {val_accuracy:.4f} | "
+              f"Val Kappa: {val_kappa:.4f} | MCC: {val_mcc:.4f} | "
+              f"Balanced Acc: {val_bal_acc:.4f} | AP: {val_ap:.4f} | "
+              f"LR: {current_lr:.6f} | "
               f"Time: {minutes}m {seconds}s | "
-              f"Est. Remaining: {total_time_remaining:.2f}s")
+              f"Estimated total remaining time: {total_time_remaining:.2f}s")
 
         # Save best model
         if val_loss < best_val_loss:
@@ -502,21 +580,24 @@ if __name__ == '__main__':
             print(f"New best model found! Saving to {model_path}...")
             save_model(model, val_accuracy, model_path)
 
+        # Check if accuracy improved but loss did not
         elif val_accuracy > (val_accuracies[-1] if val_accuracies else 0):
-            print("Warning: Accuracy increased but loss did not improve! Possible overfitting.")
-            patience_counter += 1
+            print("Warning: Validation accuracy increased but loss did not improve! Possible overfitting detected.")
+            patience_counter += 1  # Increase patience counter to monitor behavior
 
         else:
             patience_counter += 1
             print(f"No improvement ({patience_counter}/{patience})")
 
+        # Stop training if patience is exceeded
         if patience_counter >= patience:
             print("Early stopping triggered. Stopping training.")
             break
 
+        # Store validation accuracy history
         val_accuracies.append(val_accuracy)
 
-        # Adjust learning rate
+        # Step scheduler if defined
         if scheduler:
             scheduler.step()
 
@@ -546,4 +627,10 @@ if __name__ == '__main__':
     print(f"Test Recall: {test_recall:.4f}")
     print(f"Test F1 Score: {test_f1:.4f}")
 
-    plot_confusion_matrix(model, test_loader, test_classes_cleaned, device)
+    low_accuracy_species = plot_confusion_matrix_and_find_low_recall(
+        model,
+        test_loader,
+        all_species,
+        device,
+        thresholds=[0.3, 0.4, 0.5, 0.6]  # Adjust the thresholds as needed
+    )
